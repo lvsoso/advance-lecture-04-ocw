@@ -54,6 +54,10 @@ pub const UNSIGNED_TXS_PRIORITY: u64 = 100;
 pub const HTTP_REMOTE_REQUEST: &str = "https://api.github.com/orgs/substrate-developer-hub";
 pub const HTTP_HEADER_USER_AGENT: &str = "jimmychu0807";
 
+// 获取 DOT 当前对 USD 的价格
+pub const HTTP_REMOTE_REQUEST_POLKADOT: &str = "https://api.coincap.io/v2/assets/polkadot";
+
+
 pub const FETCH_TIMEOUT_PERIOD: u64 = 3000; // in milli-seconds
 pub const LOCK_TIMEOUT_EXPIRATION: u64 = FETCH_TIMEOUT_PERIOD + 1000; // in milli-seconds
 pub const LOCK_BLOCK_EXPIRATION: u32 = 3; // in block number
@@ -102,6 +106,18 @@ impl <T: SigningTypes> SignedPayload<T> for Payload<T::Public> {
 	}
 }
 
+#[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug)]
+pub struct PriceUsdPayload<Public> {
+	priceUsd: u128,
+	public: Public
+}
+
+impl <T: SigningTypes> SignedPayload<T> for PriceUsdPayload<T::Public> {
+	fn public(&self) -> T::Public {
+		self.public.clone()
+	}
+}
+
 // ref: https://serde.rs/container-attrs.html#crate
 #[derive(Deserialize, Encode, Decode, Default)]
 struct GithubInfo {
@@ -135,6 +151,35 @@ impl fmt::Debug for GithubInfo {
 	}
 }
 
+
+// ref: https://serde.rs/container-attrs.html#crate
+#[derive(Deserialize, Encode, Decode, Default)]
+struct PolkadotInfo {
+	// Specify our own deserializing function to convert JSON string to vector of bytes
+	#[serde(deserialize_with = "de_str_to_u128")]
+	priceUsd: u128,
+}
+
+pub fn de_str_to_u128<'de, D>(de: D) -> Result<u128, D::Error>
+where
+	D: Deserializer<'de>,
+{
+	// let s: &str = Deserialize::deserialize(de)?;
+	// Ok(s.as_bytes().to_vec())
+	Ok(u128::min_value())
+}
+
+impl fmt::Debug for PolkadotInfo{
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(
+			f,
+			"{{ priceUsd: {}}}",
+			// str::from_utf8(&self.priceUsd).map_err(|_| fmt::Error)?,
+			&self.priceUsd
+		)
+	}
+}
+
 /// This is the pallet's configuration trait
 pub trait Trait: system::Trait + CreateSignedTransaction<Call<Self>> {
 	/// The identifier type for an offchain worker.
@@ -149,6 +194,8 @@ decl_storage! {
 	trait Store for Module<T: Trait> as Example {
 		/// A vector of recently submitted numbers. Bounded by NUM_VEC_LEN
 		Numbers get(fn numbers): VecDeque<u32>;
+		
+		PirceLogs get(fn logs): VecDeque<u128>;
 	}
 }
 
@@ -160,6 +207,7 @@ decl_event!(
 	{
 		/// Event generated when a new number is accepted to contribute to the average.
 		NewNumber(Option<AccountId>, u32),
+		NewPriceUsd(Option<AccountId>, u128),
 	}
 );
 
@@ -178,6 +226,9 @@ decl_error! {
 		// Error returned when making unsigned transactions with signed payloads in off-chain worker
 		OffchainUnsignedTxSignedPayloadError,
 
+		
+		OffchainUnsignedTxSignedPayloadWithPkError,
+
 		// Error returned when fetching github info
 		HttpFetchingError,
 	}
@@ -185,6 +236,9 @@ decl_error! {
 
 decl_module! {
 	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
+	
+		type Error = Error<T>;
+
 		fn deposit_event() = default;
 
 		#[weight = 10000]
@@ -222,6 +276,22 @@ decl_module! {
 			Ok(())
 		}
 
+		#[weight = 10000]
+		pub fn submit_price_usd_unsigned_with_signed_payload(origin, priceUsdPayload: PriceUsdPayload<T::Public>,
+			_signature: T::Signature) -> DispatchResult
+		{
+			let _ = ensure_none(origin)?;
+			// we don't need to verify the signature here because it has been verified in
+			//   `validate_unsigned` function when sending out the unsigned tx.
+			let PriceUsdPayload { priceUsd, public } = priceUsdPayload;
+			debug::info!("submit_price_usd_unsigned_with_signed_payload: ({}, {:?})", priceUsd, public);
+			Self::append_or_replace_price_usd(priceUsd);
+
+			Self::deposit_event(RawEvent::NewPriceUsd(None, priceUsd));
+			Ok(())
+		}
+
+
 		fn offchain_worker(block_number: T::BlockNumber) {
 			debug::info!("Entering off-chain worker");
 
@@ -230,13 +300,14 @@ decl_module! {
 			// 2. Sending unsigned transaction from ocw
 			// 3. Sending unsigned transactions with signed payloads from ocw
 			// 4. Fetching JSON via http requests in ocw
-			const TX_TYPES: u32 = 4;
+			const TX_TYPES: u32 = 5;
 			let modu = block_number.try_into().map_or(TX_TYPES, |bn: u32| bn % TX_TYPES);
 			let result = match modu {
 				0 => Self::offchain_signed_tx(block_number),
 				1 => Self::offchain_unsigned_tx(block_number),
 				2 => Self::offchain_unsigned_tx_signed_payload(block_number),
 				3 => Self::fetch_github_info(),
+				4 => Self::fetch_polkadot_info(),
 				_ => Err(Error::<T>::UnknownOffchainMux),
 			};
 
@@ -248,6 +319,8 @@ decl_module! {
 }
 
 impl<T: Trait> Module<T> {
+
+	
 	/// Append a new number to the tail of the list, removing an element from the head if reaching
 	///   the bounded length.
 	fn append_or_replace_number(number: u32) {
@@ -257,6 +330,16 @@ impl<T: Trait> Module<T> {
 			}
 			numbers.push_back(number);
 			debug::info!("Number vector: {:?}", numbers);
+		});
+	}
+
+	fn append_or_replace_price_usd(priceUsd: u128) {
+		PirceLogs::mutate(|logs| {
+			if logs.len() == NUM_VEC_LEN {
+				let _ = logs.pop_front();
+			}
+			logs.push_back(priceUsd);
+			debug::info!("priceUsd log  vector: {:?}", logs);
 		});
 	}
 
@@ -366,6 +449,96 @@ impl<T: Trait> Module<T> {
 		Ok(response.body().collect::<Vec<u8>>())
 	}
 
+	//  fetch_polkadot_info
+	fn fetch_polkadot_info() -> Result<(), Error<T>> {
+
+		let mut lock = StorageLock::<BlockAndTime<Self>>::with_block_and_time_deadline(
+			b"offchain-demo-pk::lock", LOCK_BLOCK_EXPIRATION,
+			rt_offchain::Duration::from_millis(LOCK_TIMEOUT_EXPIRATION)
+		);
+
+		if let Ok(_guard) = lock.try_lock() {
+			match Self::fetch_pk_n_parse() {
+				// upload
+				Ok(pk_info) => { return Ok(()); }
+				Err(err) => { return Err(err); }
+			}
+		}
+		Ok(())
+	}
+
+	fn fetch_pk_n_parse() -> Result<PolkadotInfo, Error<T>> {
+		let resp_bytes = Self::fetch_pk_from_remote().map_err(|e| {
+			debug::error!("fetch_pk_from_remote error: {:?}", e);
+			<Error<T>>::HttpFetchingError
+		})?;
+
+		let resp_str = str::from_utf8(&resp_bytes).map_err(|_| <Error<T>>::HttpFetchingError)?;
+		// Print out our fetched JSON string
+		debug::info!("{}", resp_str);
+
+		// Deserializing JSON to struct, thanks to `serde` and `serde_derive`
+		let pk_info: PolkadotInfo =
+			serde_json::from_str(&resp_str).map_err(|_| <Error<T>>::HttpFetchingError)?;
+		Ok(pk_info)
+	}
+
+	/// This function uses the `offchain::http` API to query the remote github information,
+	///   and returns the JSON response as vector of bytes.
+	fn fetch_pk_from_remote() -> Result<Vec<u8>, Error<T>> {
+		debug::info!("sending request to: {}", HTTP_REMOTE_REQUEST_POLKADOT);
+
+		// Initiate an external HTTP GET request. This is using high-level wrappers from `sp_runtime`.
+		let request = rt_offchain::http::Request::get(HTTP_REMOTE_REQUEST_POLKADOT);
+
+		// Keeping the offchain worker execution time reasonable, so limiting the call to be within 3s.
+		let timeout = sp_io::offchain::timestamp()
+			.add(rt_offchain::Duration::from_millis(FETCH_TIMEOUT_PERIOD));
+
+		// For github API request, we also need to specify `user-agent` in http request header.
+		//   See: https://developer.github.com/v3/#user-agent-required
+		let pending = request
+			.add_header("User-Agent", HTTP_HEADER_USER_AGENT)
+			.deadline(timeout) // Setting the timeout time
+			.send() // Sending the request out by the host
+			.map_err(|_| <Error<T>>::HttpFetchingError)?;
+
+		// By default, the http request is async from the runtime perspective. So we are asking the
+		//   runtime to wait here.
+		// The returning value here is a `Result` of `Result`, so we are unwrapping it twice by two `?`
+		//   ref: https://substrate.dev/rustdocs/v2.0.0/sp_runtime/offchain/http/struct.PendingRequest.html#method.try_wait
+		let response = pending
+			.try_wait(timeout)
+			.map_err(|_| <Error<T>>::HttpFetchingError)?
+			.map_err(|_| <Error<T>>::HttpFetchingError)?;
+
+		if response.code != 200 {
+			debug::error!("Unexpected http request status code: {}", response.code);
+			return Err(<Error<T>>::HttpFetchingError);
+		}
+
+		// Next we fully read the response body and collect it to a vector of bytes.
+		Ok(response.body().collect::<Vec<u8>>())
+	}
+
+	fn offchain_unsigned_tx_signed_payload_with_pk(priceUsd: u128) -> Result<(), Error<T>> {
+		// Retrieve the signer to sign the payload
+		let signer = Signer::<T, T::AuthorityId>::any_account();
+
+		if let Some((_, res)) = signer.send_unsigned_transaction(
+			|acct| PriceUsdPayload { priceUsd, public: acct.public.clone() },
+			Call::submit_price_usd_unsigned_with_signed_payload
+		) {
+			return res.map_err(|_| {
+				debug::error!("Failed in offchain_unsigned_tx_signed_payload");
+				<Error<T>>::OffchainUnsignedTxSignedPayloadWithPkError
+			});
+		}
+
+		debug::error!("No local account available");
+		Err(<Error<T>>::NoLocalAcctForSigning)
+	}
+
 	fn offchain_signed_tx(block_number: T::BlockNumber) -> Result<(), Error<T>> {
 		// We retrieve a signer and check if it is valid.
 		//   Since this pallet only has one key in the keystore. We use `any_account()1 to
@@ -438,6 +611,7 @@ impl<T: Trait> Module<T> {
 		debug::error!("No local account available");
 		Err(<Error<T>>::NoLocalAcctForSigning)
 	}
+
 }
 
 impl<T: Trait> frame_support::unsigned::ValidateUnsigned for Module<T> {
