@@ -154,35 +154,6 @@ impl fmt::Debug for GithubInfo {
 }
 
 
-// ref: https://serde.rs/container-attrs.html#crate
-#[derive(Deserialize, Encode, Decode, Default)]
-struct PolkadotInfo {
-	// Specify our own deserializing function to convert JSON string to vector of bytes
-	// #[serde(deserialize_with = "de_str_to_u128")]
-	priceUsd: I56F8,
-}
-
-pub fn de_str_to_u128<'de, D>(de: D) -> Result<u128, D::Error>
-where
-	D: Deserializer<'de>,
-{
-	// let s: &str = Deserialize::deserialize(de)?;
-	// Ok(s.as_bytes().to_vec())
-	Ok(u128::min_value())
-}
-
-impl fmt::Debug for PolkadotInfo{
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		write!(
-			f,
-			"{{ priceUsd: {}}}",
-			// str::from_utf8(&self.priceUsd).map_err(|_| fmt::Error)?,
-			&self.priceUsd
-		)
-	}
-}
-
-
 /// This is the pallet's configuration trait
 pub trait Trait: system::Trait + CreateSignedTransaction<Call<Self>> {
 	/// The identifier type for an offchain worker.
@@ -198,7 +169,7 @@ decl_storage! {
 		/// A vector of recently submitted numbers. Bounded by NUM_VEC_LEN
 		Numbers get(fn numbers): VecDeque<u32>;
 		
-		PirceLogs get(fn logs): VecDeque<u128>;
+		PirceLogs get(fn logs): VecDeque<I56F8>;
 	}
 }
 
@@ -339,7 +310,7 @@ impl<T: Trait> Module<T> {
 		});
 	}
 
-	fn append_or_replace_price_usd(priceUsd: u128) {
+	fn append_or_replace_price_usd(priceUsd: I56F8) {
 		PirceLogs::mutate(|logs| {
 			if logs.len() == NUM_VEC_LEN {
 				let _ = logs.pop_front();
@@ -466,14 +437,17 @@ impl<T: Trait> Module<T> {
 		if let Ok(_guard) = lock.try_lock() {
 			match Self::fetch_pk_n_parse() {
 				// upload
-				Ok(pk_info) => { return Ok(()); }
+				Ok(price_usd) => { 
+					// 使用不带签名交易，带签名payload的方式发送上链，这样不需要手续费什么的；
+					Self::offchain_unsigned_tx_signed_payload_with_pk(price_usd);
+				}
 				Err(err) => { return Err(err); }
 			}
 		}
 		Ok(())
 	}
 
-	fn fetch_pk_n_parse() -> Result<PolkadotInfo, Error<T>> {
+	fn fetch_pk_n_parse() -> Result<I56F8, Error<T>> {
 		let resp_bytes = Self::fetch_pk_from_remote().map_err(|e| {
 			debug::error!("fetch_pk_from_remote error: {:?}", e);
 			<Error<T>>::HttpFetchingError
@@ -484,13 +458,11 @@ impl<T: Trait> Module<T> {
 		debug::info!("{}", resp_str);
 
 		let v: Value = serde_json::from_str(&resp_str).map_err(|_| <Error<T>>::HttpResultParseError)?;
-		let s : &str = v["data"]["priceUsd"].as_str().map_err(|_| <Error<T>>::HttpResultParseError)?;
+		let s : &str = v["data"]["priceUsd"].as_str().unwrap();
+
 		let f: f64 = serde_json::from_str(s).map_err(|_| <Error<T>>::HttpResultParseError)?;
 		let price_usd = I56F8::from_num(f);
-		let pk_info = PolkadotInfo{
-			priceUsd: price_usd,
-		};
-		Ok(pk_info)
+		Ok(price_usd)
 	}
 
 	fn fetch_pk_from_remote() -> Result<Vec<u8>, Error<T>> {
@@ -520,7 +492,7 @@ impl<T: Trait> Module<T> {
 		Ok(response.body().collect::<Vec<u8>>())
 	}
 
-	fn offchain_unsigned_tx_signed_payload_with_pk(priceUsd: u128) -> Result<(), Error<T>> {
+	fn offchain_unsigned_tx_signed_payload_with_pk(priceUsd: I56F8) -> Result<(), Error<T>> {
 		// Retrieve the signer to sign the payload
 		let signer = Signer::<T, T::AuthorityId>::any_account();
 
@@ -631,6 +603,12 @@ impl<T: Trait> frame_support::unsigned::ValidateUnsigned for Module<T> {
 					return InvalidTransaction::BadProof.into();
 				}
 				valid_tx(b"submit_number_unsigned_with_signed_payload".to_vec())
+			},
+			Call::submit_price_usd_unsigned_with_signed_payload(ref payload, ref signature) => {
+				if !SignedPayload::<T>::verify::<T::AuthorityId>(payload, signature.clone()) {
+					return InvalidTransaction::BadProof.into();
+				}
+				valid_tx(b"submit_price_usd_unsigned_with_signed_payload".to_vec())
 			},
 			_ => InvalidTransaction::Call.into(),
 		}

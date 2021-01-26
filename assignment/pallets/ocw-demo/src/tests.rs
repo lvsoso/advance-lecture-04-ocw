@@ -182,7 +182,6 @@ fn submit_number_signed_works() {
 #[test]
 fn test_offchain_signed_tx() {
 	let (mut t, pool_state, _offchain_state) = ExternalityBuilder::build();
-
 	t.execute_with(|| {
 		// Setup
 		let num = 32;
@@ -193,7 +192,8 @@ fn test_offchain_signed_tx() {
 		assert!(pool_state.read().transactions.is_empty());
 		let tx = TestExtrinsic::decode(&mut &*tx).unwrap();
 		assert_eq!(tx.signature.unwrap().0, 0);
-		assert_eq!(tx.call, Call::submit_number_signed(num));
+		let num_u32 = num.try_into().unwrap();
+		assert_eq!(tx.call, Call::submit_number_signed(num_u32));
 	});
 }
 
@@ -210,6 +210,29 @@ fn test_offchain_unsigned_tx() {
 		assert!(pool_state.read().transactions.is_empty());
 		let tx = TestExtrinsic::decode(&mut &*tx).unwrap();
 		assert_eq!(tx.signature, None);
-		assert_eq!(tx.call, Call::submit_number_unsigned(num));
+		let num_u32 = num.try_into().unwrap();
+		assert_eq!(tx.call, Call::submit_number_unsigned(num_u32));
+	});
+}
+
+#[test]
+fn test_fetch_polkadot_info() {
+	// let (mut t, pool_state, _offchain_state) = ExternalityBuilder::build();
+	let (mut t, _, _) = ExternalityBuilder::build();
+	t.execute_with(|| {
+		use fixed::types::I56F8;
+		
+		let acct: <TestRuntime as system::Trait>::AccountId = Default::default();
+		let price_usd = I56F8::from_num(17.123);
+
+		assert_ok!(OcwDemo::fetch_polkadot_info());
+
+		// OcwDemo::append_or_replace_price_usd(price_usd);
+		assert_eq!(<PirceLogs>::get(), vec![price_usd]);
+		
+		// OcwDemo::deposit_event(RawEvent::NewPriceUsd(None, price_usd));
+		assert!(System::events()
+			.iter()
+			.any(|er| er.event == TestEvent::ocw_demo(RawEvent::NewPriceUsd(None, price_usd))));
 	});
 }
