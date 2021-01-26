@@ -36,7 +36,9 @@ use sp_std::{
 	collections::vec_deque::VecDeque,
 };
 
+use fixed::types::I56F8;
 use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 
 /// Defines application identifier for crypto keys of this module.
 ///
@@ -52,7 +54,7 @@ pub const UNSIGNED_TXS_PRIORITY: u64 = 100;
 
 // We are fetching information from the github public API about organization`substrate-developer-hub`.
 pub const HTTP_REMOTE_REQUEST: &str = "https://api.github.com/orgs/substrate-developer-hub";
-pub const HTTP_HEADER_USER_AGENT: &str = "jimmychu0807";
+pub const HTTP_HEADER_USER_AGENT: &str = "lvsoso";
 
 // 获取 DOT 当前对 USD 的价格
 pub const HTTP_REMOTE_REQUEST_POLKADOT: &str = "https://api.coincap.io/v2/assets/polkadot";
@@ -108,7 +110,7 @@ impl <T: SigningTypes> SignedPayload<T> for Payload<T::Public> {
 
 #[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug)]
 pub struct PriceUsdPayload<Public> {
-	priceUsd: u128,
+	priceUsd: I56F8,
 	public: Public
 }
 
@@ -156,8 +158,8 @@ impl fmt::Debug for GithubInfo {
 #[derive(Deserialize, Encode, Decode, Default)]
 struct PolkadotInfo {
 	// Specify our own deserializing function to convert JSON string to vector of bytes
-	#[serde(deserialize_with = "de_str_to_u128")]
-	priceUsd: u128,
+	// #[serde(deserialize_with = "de_str_to_u128")]
+	priceUsd: I56F8,
 }
 
 pub fn de_str_to_u128<'de, D>(de: D) -> Result<u128, D::Error>
@@ -179,6 +181,7 @@ impl fmt::Debug for PolkadotInfo{
 		)
 	}
 }
+
 
 /// This is the pallet's configuration trait
 pub trait Trait: system::Trait + CreateSignedTransaction<Call<Self>> {
@@ -207,7 +210,7 @@ decl_event!(
 	{
 		/// Event generated when a new number is accepted to contribute to the average.
 		NewNumber(Option<AccountId>, u32),
-		NewPriceUsd(Option<AccountId>, u128),
+		NewPriceUsd(Option<AccountId>, I56F8),
 	}
 );
 
@@ -231,6 +234,9 @@ decl_error! {
 
 		// Error returned when fetching github info
 		HttpFetchingError,
+
+		HttpResultParseError,
+
 	}
 }
 
@@ -477,36 +483,30 @@ impl<T: Trait> Module<T> {
 		// Print out our fetched JSON string
 		debug::info!("{}", resp_str);
 
-		// Deserializing JSON to struct, thanks to `serde` and `serde_derive`
-		let pk_info: PolkadotInfo =
-			serde_json::from_str(&resp_str).map_err(|_| <Error<T>>::HttpFetchingError)?;
+		let v: Value = serde_json::from_str(&resp_str).map_err(|_| <Error<T>>::HttpResultParseError)?;
+		let s : &str = v["data"]["priceUsd"].as_str().map_err(|_| <Error<T>>::HttpResultParseError)?;
+		let f: f64 = serde_json::from_str(s).map_err(|_| <Error<T>>::HttpResultParseError)?;
+		let price_usd = I56F8::from_num(f);
+		let pk_info = PolkadotInfo{
+			priceUsd: price_usd,
+		};
 		Ok(pk_info)
 	}
 
-	/// This function uses the `offchain::http` API to query the remote github information,
-	///   and returns the JSON response as vector of bytes.
 	fn fetch_pk_from_remote() -> Result<Vec<u8>, Error<T>> {
 		debug::info!("sending request to: {}", HTTP_REMOTE_REQUEST_POLKADOT);
 
-		// Initiate an external HTTP GET request. This is using high-level wrappers from `sp_runtime`.
 		let request = rt_offchain::http::Request::get(HTTP_REMOTE_REQUEST_POLKADOT);
 
-		// Keeping the offchain worker execution time reasonable, so limiting the call to be within 3s.
 		let timeout = sp_io::offchain::timestamp()
 			.add(rt_offchain::Duration::from_millis(FETCH_TIMEOUT_PERIOD));
 
-		// For github API request, we also need to specify `user-agent` in http request header.
-		//   See: https://developer.github.com/v3/#user-agent-required
 		let pending = request
 			.add_header("User-Agent", HTTP_HEADER_USER_AGENT)
-			.deadline(timeout) // Setting the timeout time
-			.send() // Sending the request out by the host
+			.deadline(timeout)
+			.send()
 			.map_err(|_| <Error<T>>::HttpFetchingError)?;
 
-		// By default, the http request is async from the runtime perspective. So we are asking the
-		//   runtime to wait here.
-		// The returning value here is a `Result` of `Result`, so we are unwrapping it twice by two `?`
-		//   ref: https://substrate.dev/rustdocs/v2.0.0/sp_runtime/offchain/http/struct.PendingRequest.html#method.try_wait
 		let response = pending
 			.try_wait(timeout)
 			.map_err(|_| <Error<T>>::HttpFetchingError)?
@@ -517,7 +517,6 @@ impl<T: Trait> Module<T> {
 			return Err(<Error<T>>::HttpFetchingError);
 		}
 
-		// Next we fully read the response body and collect it to a vector of bytes.
 		Ok(response.body().collect::<Vec<u8>>())
 	}
 

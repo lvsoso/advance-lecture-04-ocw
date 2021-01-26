@@ -31,6 +31,12 @@ sp-io = { version = '2.0.1', default-features = false }
 sp-runtime = { version = '2.0.1', default-features = false }
 sp-std = { version = '2.0.1', default-features = false }
 
+[dependencies.fixed]
+default-features = false
+git = "https://github.com/encointer/substrate-fixed"
+package = "substrate-fixed"
+features = ["f16", "serde"]
+
 [features]
 default = ['std']
 std = [

@@ -2059,6 +2059,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "half"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62aca2aba2d62b4a7f5b33f3712cb1b0692779a56fb510499d5c0aa594daeaf3"
+
+[[package]]
 name = "hash-db"
 version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3858,6 +3864,7 @@ dependencies = [
  "sp-io",
  "sp-runtime",
  "sp-std",
+ "substrate-fixed",
 ]
 
 [[package]]
@@ -7031,6 +7038,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9726c2926418239f73d4d939fcc4ceb5c6697609426c64dd3bcf664f06986afa"
 dependencies = [
  "platforms",
+]
+
+[[package]]
+name = "substrate-fixed"
+version = "0.5.5"
+source = "git+https://github.com/encointer/substrate-fixed#310e0d3a4c498b16ab7f790e99bbf6cf06e87a43"
+dependencies = [
+ "half",
+ "parity-scale-codec",
+ "serde",
+ "typenum",
 ]
 
 [[package]]
